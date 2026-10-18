@@ -123,7 +123,7 @@ LABELS = {
         "no": "N°", "layer": "Couche", "type": "Type", "material": "Matériau",
         "thickness": "Épaisseur (mm)", "er": "εr", "tand": "tan δ",
         "total": "Épaisseur totale (cuivre + diélectriques)",
-        "artwork": "Artwork de la couche",
+        "artwork": "Artwork de la couche", "figure": "Figure", "sep": " : ",
         "no_stackup": "Stackup non défini dans le projet KiCad.",
         "drilling_title": "Perçages (Through Holes)",
         "symbol": "Symbole", "diameter_mm": "Diamètre (mm)", "plated": "Plaqué",
@@ -143,7 +143,7 @@ LABELS = {
         "no": "No.", "layer": "Layer", "type": "Type", "material": "Material",
         "thickness": "Thickness (mm)", "er": "εr", "tand": "tan δ",
         "total": "Total thickness (copper + dielectrics)",
-        "artwork": "Artwork of layer",
+        "artwork": "Artwork of layer", "figure": "Figure", "sep": ": ",
         "no_stackup": "No stackup defined in the KiCad project.",
         "drilling_title": "Through Holes",
         "symbol": "Symbol", "diameter_mm": "Diameter (mm)", "plated": "Plated",
@@ -674,7 +674,7 @@ def ensure_styles(content_root) -> None:
                                     fo:margin-bottom="0.2cm"/>
       </style:style>
       <style:style style:name="{STYLE_PREFIX}_Cap" style:family="paragraph">
-        <style:paragraph-properties fo:text-align="center" fo:keep-with-next="always"/>
+        <style:paragraph-properties fo:text-align="center" fo:keep-together="always"/>
         <style:text-properties fo:font-style="italic"/>
       </style:style>
       <style:style style:name="{STYLE_PREFIX}_Frame" style:family="graphic">
@@ -901,6 +901,52 @@ def build_symbol_svg(idx: int, size_mm: float) -> str:
            f'<svg xmlns="http://www.w3.org/2000/svg" width="{2*half:.3f}mm" height="{2*half:.3f}mm" '
            f'viewBox="{-half:.3f} {-half:.3f} {2*half:.3f} {2*half:.3f}">{markup}</svg>')
 
+_fig = {"n": 0}
+
+
+def make_caption(text: str, style: str, lang: str):
+    """Légende « Figure N : texte » avec un champ de séquence LibreOffice de catégorie
+    « Illustration » : c'est ce que reconnaît Insertion > Table des matières et index >
+    Table des illustrations. Le numéro est recalculé par renumber_illustrations()."""
+    _fig["n"] += 1
+    p = etree.Element(q("text:p"))
+    p.set(q("text:style-name"), style)
+    p.text = f"{LABELS[lang]['figure']} "
+    seq = etree.SubElement(p, q("text:sequence"))
+    seq.set(q("text:ref-name"), f"refPCBDocFig{_fig['n']}")
+    seq.set(q("text:name"), "Illustration")
+    seq.set(q("text:formula"), "ooow:Illustration+1")
+    seq.set(q("style:num-format"), "1")
+    seq.text = str(_fig["n"])
+    seq.tail = f"{LABELS[lang]['sep']}{text}"
+    return p
+
+
+def ensure_illustration_decl(content_root) -> None:
+    """Déclare la séquence « Illustration » dans office:text si le template ne l'a pas."""
+    body = content_root.find(f"{q('office:body')}/{q('office:text')}")
+    decls = body.find(q("text:sequence-decls"))
+    if decls is None:
+        decls = etree.Element(q("text:sequence-decls"))
+        pos = 0
+        for i, ch in enumerate(body):
+            if ch.tag in (q("office:forms"), q("text:tracked-changes"), q("text:variable-decls")):
+                pos = i + 1
+        body.insert(pos, decls)
+    if not any(d.get(q("text:name")) == "Illustration" for d in decls):
+        d = etree.SubElement(decls, q("text:sequence-decl"))
+        d.set(q("text:display-outline-level"), "0")
+        d.set(q("text:name"), "Illustration")
+
+
+def renumber_illustrations(content_root) -> None:
+    """Renumérote toutes les légendes « Illustration » dans l'ordre (celles du template
+    comprises), pour que les numéros affichés soient justes dès l'ouverture."""
+    n = 0
+    for seq in content_root.iter(q("text:sequence")):
+        if seq.get(q("text:name")) == "Illustration":
+            n += 1
+            seq.text = str(n)
 
 def parse_bool(v: str) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "oui", "on")
@@ -908,7 +954,7 @@ def parse_bool(v: str) -> bool:
 
 def parse_params(s: str | None) -> dict:
     out = {}
-    for part in (s or "").split(","):
+    for part in re.split(r",\s*(?=[A-Za-z_]+=)", s or ""):
         if "=" in part:
             k, v = part.split("=", 1)
             out[k.strip().lower()] = v.strip()
@@ -980,6 +1026,7 @@ def main() -> int:
         sys.exit("Ce fichier n'est pas un ODT valide (content.xml absent).")
     content = etree.fromstring(files["content.xml"])
     ensure_styles(content)
+    ensure_illustration_decl(content)
 
     new_pictures: dict[str, bytes] = {}
     pic_counter = {"n": 0}
@@ -990,7 +1037,7 @@ def main() -> int:
 
     def artwork_blocks(layer: str, width_mm: float | None, with_caption: bool,
                        layers: list[str] | None = None, bw: bool | None = None,
-                       theme: str | None = None, margin_mm: float = 0.0):
+                       theme: str | None = None, margin_mm: float = 0.0, caption: str | None = None):
         """`layer` = nom affiché/fichier ; `layers` = couches KiCad (défaut : layer + Edge.Cuts)."""
         if layers is None:
             layers = [layer] if layer == "Edge.Cuts" else [layer, "Edge.Cuts"]
@@ -1010,10 +1057,10 @@ def main() -> int:
         href = f"Pictures/pcbdoc_{pic_counter['n']:02d}_{layer_file_stem(layer)}{img.suffix}"
         new_pictures[href] = img.read_bytes()
         blocks = []
-        if with_caption:
-            blocks.append(make_par(f"{LABELS[args.lang]['artwork']} {layer}",
-                                   f"{STYLE_PREFIX}_Cap"))
         blocks.append(build_image_paragraph(href, f"Artwork {layer}", w, h))
+        if with_caption or caption:
+            text = caption or f"{LABELS[args.lang]['artwork']} {layer}"
+            blocks.append(make_caption(text, f"{STYLE_PREFIX}_Cap", args.lang))
         return blocks
 
     composites = {k: list(v) for k, v in DEFAULT_COMPOSITES.items()}
@@ -1025,7 +1072,7 @@ def main() -> int:
 
     _symbol_pics: dict[int, str] = {}   # cache : idx symbole -> href déjà publié
 
-    def drilling_drawing_blocks(width_mm: float | None, symbol_size_mm: float, margin_mm: float, with_caption: bool = True):
+    def drilling_drawing_blocks(width_mm: float | None, symbol_size_mm: float, margin_mm: float, with_caption: bool = True, caption: str | None = None):
         groups = build_drilling_groups(data["holes"], args.drill_tolerance_mm)
         if not data["outline_pts"]:
             warnings.append("{{drilling_drawing}} : pas de contour Edge.Cuts trouvé, image non générée.")
@@ -1045,10 +1092,10 @@ def main() -> int:
         href = f"Pictures/pcbdoc_{pic_counter['n']:02d}_drilling_drawing.svg"
         new_pictures[href] = svg_text.encode("utf-8")
         blocks = []
-        if with_caption:
-            blocks.append(make_par("Drilling drawing",
-                                            f"{STYLE_PREFIX}_Cap"))
         blocks.append(build_image_paragraph(href, "Drilling drawing", w, h))
+        if with_caption:
+            text = caption or "Drilling drawing"
+            blocks.append(make_caption(text, f"{STYLE_PREFIX}_Cap", args.lang))
         return blocks
 
     def drilling_table_blocks(symbol_size_mm: float):
@@ -1121,14 +1168,14 @@ def main() -> int:
             width = float(params["width"]) if "width" in params else None
             bw = parse_bool(params["bw"]) if "bw" in params else (True if comp in DEFAULT_BW else None)
             return artwork_blocks(comp, width, with_caption=False, layers=composites[comp],
-                                  bw=bw, theme=params.get("theme"), margin_mm=float(params.get("margin", DEFAULT_MARGIN.get(comp, 0.0))))
+                                  bw=bw, theme=params.get("theme"), margin_mm=float(params.get("margin", DEFAULT_MARGIN.get(comp, 0.0))), caption=params.get("caption"))
         if kind == "artwork":
             if not arg:
                 raise ValueError("{{artwork:NOM_COUCHE}} : nom de couche manquant")
             width = float(params["width"]) if "width" in params else None
             bw = parse_bool(params["bw"]) if "bw" in params else None
             return artwork_blocks(arg.strip(), width, with_caption=False,
-                                  bw=bw, theme=params.get("theme"))
+                                  bw=bw, theme=params.get("theme"), caption=params.get("caption"))
         # artworks : cuivre + masques + sérigraphies présents dans la carte
         present = {n for n, _ in data["layers"]}
         names = data["copper_layers"] + [n for n in ARTWORKS_DEFAULT_EXTRA if n in present]
@@ -1157,6 +1204,7 @@ def main() -> int:
     n_inline = 0
     for p in content.iter(q("text:p"), q("text:h")):
         n_inline += replace_inline(p, values, unknown_inline)
+    renumber_illustrations(content)  
     files["content.xml"] = etree.tostring(content, xml_declaration=True, encoding="UTF-8")
     if "styles.xml" in files:
         styles = etree.fromstring(files["styles.xml"])

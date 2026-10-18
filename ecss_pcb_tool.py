@@ -16,6 +16,8 @@ Usage
   python ecss_pcb_tool.py board.kicad_pcb                  # DRU + checks + report
   python ecss_pcb_tool.py board.kicad_pcb --write-config ecss_config.json
   python ecss_pcb_tool.py board.kicad_pcb --config ecss_config.json --force
+The report goes to <board folder>/ecss_check_results/ecss_rule_check_DDMMYYYY_HH:MM:SS.txt
+(folder created if missing; ':' becomes '-' on Windows). The terminal only shows 4 progress lines.
 Exit code: 1 if at least one ERROR was found, else 0.
 """
 from __future__ import annotations
@@ -23,8 +25,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -984,6 +988,7 @@ def write_report(path, b, cfg, infos, findings):
     findings = sorted(findings, key=lambda f: (order[f.sev], f.req))
     cnt = {k: sum(1 for f in findings if f.sev == k) for k in order}
     L = [f"# ECSS check report - {Path(b.path).name}\n",
+         f"Generated: {datetime.now():%Y-%m-%d %H:%M:%S}\n",
          f"**{cnt['ERROR']} error(s), {cnt['WARNING']} warning(s), {cnt['INFO']} info**\n",
          "## Values derived from the stackup\n",
          "| Layer | Role | Foil (um) | Th (um) | Spacing shall (um) | Spacing should (um) | Min track width (um) |",
@@ -1010,7 +1015,7 @@ def main(argv=None):
     ap.add_argument("--config", help="JSON config (see --write-config)")
     ap.add_argument("--write-config", metavar="FILE", help="write a default config file and exit")
     ap.add_argument("--dru", help="output .kicad_dru (default: next to the board, same stem)")
-    ap.add_argument("--report", help="output Markdown report (default: <board stem>_ecss_report.md)")
+    ap.add_argument("--report", help="report path (default: <board folder>/ecss_check_results/ecss_rule_check_DDMMYYYY_HH:MM:SS.txt)")
     ap.add_argument("--no-dru", action="store_true")
     ap.add_argument("--no-checks", action="store_true")
     ap.add_argument("--force", action="store_true", help="overwrite an existing .kicad_dru")
@@ -1028,28 +1033,34 @@ def main(argv=None):
         cfg["conformal_coating"] = True
 
     board_path = Path(a.board)
+    print(f"[1/4] Reading {board_path.name} ...", flush=True)
     b = parse_board(board_path)
     infos = derive_layers(b, cfg)
-    print(f"Parsed {board_path.name}: {len(b.footprints)} footprints, {len(b.segs)} track segments, "
-          f"{len(b.vias)} vias, copper layers {b.copper_layers}")
 
-    if not a.no_dru:
+    if a.no_dru:
+        print("[2/4] Rule file skipped")
+    else:
         dru_path = Path(a.dru) if a.dru else board_path.with_suffix(".kicad_dru")
         if dru_path.exists() and not a.force:
-            print(f"{dru_path} exists - not overwritten (use --force or --dru other.kicad_dru)")
+            print(f"[2/4] Rule file kept (already exists, use --force to overwrite): {dru_path}")
         else:
             dru_path.write_text(build_dru(b, cfg, infos), encoding="utf-8")
-            print(f"Rule file written: {dru_path}")
+            print(f"[2/4] Rule file written: {dru_path}")
 
     rc = 0
-    if not a.no_checks:
+    if a.no_checks:
+        print("[3/4] Checks skipped")
+    else:
+        print("[3/4] Running checks ...", flush=True)
         findings = Checker(b, cfg, infos).run()
-        rep = Path(a.report) if a.report else board_path.with_name(board_path.stem + "_ecss_report.md")
+        if a.report:
+            rep = Path(a.report)
+        else:
+            fmt = "%d%m%Y_%H-%M-%S" if os.name == "nt" else "%d%m%Y_%H:%M:%S"   # ':' not allowed on Windows
+            rep = board_path.resolve().parent / "ecss_check_results" / f"ecss_rule_check_{datetime.now().strftime(fmt)}.txt"
+        rep.parent.mkdir(parents=True, exist_ok=True)
         cnt = write_report(rep, b, cfg, infos, findings)
-        print(f"Report: {rep}  ->  {cnt['ERROR']} error(s), {cnt['WARNING']} warning(s), {cnt['INFO']} info")
-        for f in findings:
-            if f.sev != "INFO":
-                print(f"  [{f.sev}] {f.req} | {f.where} | {f.msg}")
+        print(f"[4/4] Done: {cnt['ERROR']} error(s), {cnt['WARNING']} warning(s) -> {rep}")
         rc = 1 if cnt["ERROR"] else 0
     return rc
 
