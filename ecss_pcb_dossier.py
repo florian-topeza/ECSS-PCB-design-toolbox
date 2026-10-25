@@ -1080,7 +1080,7 @@ ARTWORKS_DEFAULT_EXTRA = ["F.Mask", "B.Mask", "F.SilkS", "B.SilkS"]
 DEFAULT_BW = {"mechanical_data"}
 
 DEFAULT_COMPOSITES = {
-    "mechanical_data": ["Edge.Cuts", "F.Paste", "Dwgs.User"],
+    "mechanical_data": ["Edge.Cuts", "Dwgs.User"],
 }
 
 
