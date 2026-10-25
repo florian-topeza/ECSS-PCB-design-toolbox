@@ -48,6 +48,10 @@ Marqueurs de bloc (le marqueur doit être SEUL dans son paragraphe) :
                                   même si un seul des deux marqueurs est utilisé.
                                   NON généré : les bulles "Note 1/2/3" de cotation
                                   particulière (pas une donnée KiCad).
+
+    {{checklist}}                 tableau checklist des fichiers de fabrication
+                                  (Gerber et perçage) avec nom du fichier, taille,
+                                  date de dernière modification et CRC32.
     
     Options par image (après « | », séparées par des virgules) :
         width=120   largeur en mm        bw=1 / bw=0   noir et blanc oui / non
@@ -68,7 +72,7 @@ inclus avec KiCad 10). Optionnel : cairosvg pour --image-format png.
 
 Exemples
 --------
-    python ecss_pcb_dossier.py carte.kicad_pcb template.odt -o dossier.odt
+    python ecss_pcb_dossier.py carte.kicad_pcb template.odt -o dossier.odt --gerber Gerber/
     python ecss_pcb_dossier.py carte.kicad_pcb template.odt -o dossier.odt --lang en \
         --image-width 150 --theme "KiCad Classic"
     # Réutiliser des SVG déjà exportés (dans build/artworks/F_Cu.svg, ...):
@@ -86,6 +90,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+import zlib
 from pathlib import Path
 
 try:
@@ -129,6 +134,12 @@ LABELS = {
         "symbol": "Symbole", "diameter_mm": "Diamètre (mm)", "plated": "Plaqué",
         "quantity": "Quantité", "yes": "Oui", "no": "Non",
         "no_holes": "Aucun perçage trouvé dans le projet KiCad.",
+        "checklist_title": "Fichiers de fabrication (Gerber / perçage)",
+        "file": "Fichier", "size": "Taille", "modified": "Dernière modification",
+        "crc32": "CRC32",
+        "no_gerber_dir": "Dossier Gerber introuvable ou non fourni (--gerber).",
+        "no_gerber_files": "Aucun fichier trouvé dans le dossier Gerber.",
+        "byte_unit": "o", "kb_unit": "Ko", "mb_unit": "Mo",
         "types": {
             "copper": "Cuivre", "core": "Âme (core)", "prepreg": "Préimprégné",
             "top solder mask": "Vernis épargne (dessus)",
@@ -149,6 +160,12 @@ LABELS = {
         "symbol": "Symbol", "diameter_mm": "Diameter (mm)", "plated": "Plated",
         "quantity": "Quantity", "yes": "Yes", "no": "No",
         "no_holes": "No drilled hole found in the KiCad project.",
+        "checklist_title": "Fabrication files (Gerber / drill)",
+        "file": "File", "size": "Size", "modified": "Last modified",
+        "crc32": "CRC32",
+        "no_gerber_dir": "Gerber folder not found or not provided (--gerber).",
+        "no_gerber_files": "No file found in the Gerber folder.",
+        "byte_unit": "B", "kb_unit": "KB", "mb_unit": "MB",
         "types": {
             "copper": "Copper", "core": "Core", "prepreg": "Prepreg",
             "top solder mask": "Solder mask (top)",
@@ -429,6 +446,24 @@ def build_values(pcb_path: Path, data: dict) -> dict:
         "board_size": f"{w} × {h} mm" if bbox else "",
     }
 
+def collect_gerber_files(gerber_dir: Path | None) -> list[dict] | None:
+    """Fichiers du dossier Gerber (non récursif, triés par nom), avec taille, date
+    de dernière modification et CRC32. Retourne None si le dossier est absent ou
+    non fourni (distinct d'une liste vide, qui signifie « dossier vide »)."""
+    if gerber_dir is None or not gerber_dir.is_dir():
+        return None
+    out = []
+    for p in sorted(gerber_dir.iterdir(), key=lambda p: p.name.lower()):
+        if not p.is_file():
+            continue
+        data = p.read_bytes()
+        out.append({
+            "name": p.name,
+            "size": len(data),
+            "mtime": dt.datetime.fromtimestamp(p.stat().st_mtime),
+            "crc32": f"{zlib.crc32(data) & 0xFFFFFFFF:08X}",
+        })
+    return out
 
 # --------------------------------------------------------------------------- #
 # Export des artworks avec kicad-cli
@@ -563,12 +598,12 @@ def prepare_artwork(name: str, layers: list[str], pcb: Path, artdir: Path, args,
 # --------------------------------------------------------------------------- #
 # Manipulation ODT
 # --------------------------------------------------------------------------- #
-BLOCK_RE = re.compile(r"^\s*\{\{\s*(stackup|artworks|artwork|drilling_drawing|drilling_table)"
-                      r"(?:\.([A-Za-z_]\w*))?\s*(?::\s*([^}|]+?))?\s*(?:\|\s*([^}]*?))?\s*\}\}\s*$")
+BLOCK_RE = re.compile(r"^\s*\{\{\s*(stackup|artworks|artwork|drilling_drawing|drilling_table"
+                      r"|checklist)(?:\.([A-Za-z_]\w*))?\s*(?::\s*([^}|]+?))?\s*"
+                      r"(?:\|\s*([^}]*?))?\s*\}\}\s*$")
 INLINE_RE = re.compile(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}")
 
 STYLE_PREFIX = "PCBDoc"
-
 
 def paragraph_text(p) -> str:
     return "".join(_slot_text(e, a) for e, a in collect_slots(p))
@@ -757,6 +792,83 @@ def build_stackup_table(stackup, finish, lang: str, full: bool):
     return [tbl]
 
 
+# --------------------------------------------------------------------------- #
+# Checklist des fichiers de fabrication (Gerber / perçage)
+# --------------------------------------------------------------------------- #
+def collect_gerber_files(gerber_dir: Path | None) -> list[dict] | None:
+    """Fichiers du dossier Gerber (non récursif, triés par nom), avec taille, date
+    de dernière modification et CRC32. Retourne None si le dossier est absent ou
+    non fourni (distinct d'une liste vide, qui signifie « dossier vide »)."""
+    if gerber_dir is None or not gerber_dir.is_dir():
+        return None
+    out = []
+    for p in sorted(gerber_dir.iterdir(), key=lambda p: p.name.lower()):
+        if not p.is_file():
+            continue
+        data = p.read_bytes()
+        out.append({
+            "name": p.name,
+            "size": len(data),
+            "mtime": dt.datetime.fromtimestamp(p.stat().st_mtime),
+            "crc32": f"{zlib.crc32(data) & 0xFFFFFFFF:08X}",
+        })
+    return out
+
+
+def format_size(n: int, lang: str) -> str:
+    L = LABELS[lang]
+    if n < 1024:
+        return f"{n} {L['byte_unit']}"
+    kb = n / 1024
+    if kb < 1024:
+        return f"{fmt_num(kb, 1)} {L['kb_unit']}"
+    return f"{fmt_num(kb / 1024, 2)} {L['mb_unit']}"
+
+
+def build_checklist_table(files: list[dict] | None, lang: str):
+    L = LABELS[lang]
+    if files is None:
+        return [make_par(L["no_gerber_dir"], f"{STYLE_PREFIX}_Txt")]
+    if not files:
+        return [make_par(L["no_gerber_files"], f"{STYLE_PREFIX}_Txt")]
+    header = [L["file"], L["size"], L["modified"], L["crc32"]]
+    col_styles = ["_ColWide", "_ColNarrow", "_Col", "_ColNarrow"]
+
+    tbl = etree.Element(q("table:table"))
+    tbl.set(q("table:name"), "PCB_Checklist")
+    tbl.set(q("table:style-name"), f"{STYLE_PREFIX}_Tbl")
+    for cs in col_styles:
+        col = etree.SubElement(tbl, q("table:table-column"))
+        col.set(q("table:style-name"), STYLE_PREFIX + cs)
+
+    def cell(parent, text, head=False, span=None):
+        tc = etree.SubElement(parent, q("table:table-cell"))
+        tc.set(q("table:style-name"), f"{STYLE_PREFIX}_{'CellHead' if head else 'Cell'}")
+        tc.set(q("office:value-type"), "string")
+        if span:
+            tc.set(q("table:number-columns-spanned"), str(span))
+        tc.append(make_par(text, f"{STYLE_PREFIX}_{'TxtHead' if head else 'Txt'}"))
+        return tc
+
+    tr = etree.SubElement(tbl, q("table:table-row"))
+    cell(tr, L["checklist_title"], head=True, span=len(header))
+    for _ in range(len(header) - 1):
+        etree.SubElement(tr, q("table:covered-table-cell"))
+
+    hdr = etree.SubElement(tbl, q("table:table-header-rows"))
+    tr = etree.SubElement(hdr, q("table:table-row"))
+    for htext in header:
+        cell(tr, htext, head=True)
+
+    for f in files:
+        tr = etree.SubElement(tbl, q("table:table-row"))
+        cell(tr, f["name"])
+        cell(tr, format_size(f["size"], lang))
+        cell(tr, f["mtime"].strftime("%d/%m/%Y %H:%M"))
+        cell(tr, f["crc32"])
+    return [tbl]
+
+
 def build_image_paragraph(href: str, name: str, w_mm: float, h_mm: float):
     p = etree.Element(q("text:p"))
     p.set(q("text:style-name"), f"{STYLE_PREFIX}_Img")
@@ -773,7 +885,6 @@ def build_image_paragraph(href: str, name: str, w_mm: float, h_mm: float):
     im.set(q("xlink:show"), "embed")
     im.set(q("xlink:actuate"), "onLoad")
     return p
-
 
 # --------------------------------------------------------------------------- #
 # Plan de perçage ("drilling drawing") - dessiné par le script, pas par kicad-cli
@@ -977,6 +1088,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("pcb", type=Path, help="fichier .kicad_pcb")
     ap.add_argument("template", type=Path, help="template ODT avec marqueurs {{...}}")
+    ap.add_argument("--gerber", type=Path,
+                help="dossier contenant les Gerber et fichiers de perçage, pour {{checklist}}")
     ap.add_argument("-o", "--output", type=Path, required=True, help="ODT de sortie")
     ap.add_argument("--workdir", type=Path, default=Path("build"),
                     help="dossier de travail (SVG exportés) [build]")
@@ -1033,6 +1146,10 @@ def main() -> int:
     unknown_inline: set[str] = set()
     warnings: list[str] = []
 
+    if args.gerber and not args.gerber.is_dir():
+        warnings.append(f"--gerber : dossier introuvable ({args.gerber})")
+    gerber_files = collect_gerber_files(args.gerber)
+    
     present_layers = {n for n, _ in data["layers"]}
 
     def artwork_blocks(layer: str, width_mm: float | None, with_caption: bool,
@@ -1161,6 +1278,8 @@ def main() -> int:
         if kind == "drilling_table":
             ssize = float(params["symbol_size"]) if "symbol_size" in params else args.symbol_size_mm
             return drilling_table_blocks(ssize)
+        if kind == "checklist":
+            return build_checklist_table(gerber_files, args.lang)
         if kind == "artwork" and comp:
             if comp not in composites:
                 raise ValueError(f"image composite inconnue « {comp} » "
@@ -1213,8 +1332,9 @@ def main() -> int:
         files["styles.xml"] = etree.tostring(styles, xml_declaration=True, encoding="UTF-8")
 
     # Marqueurs de bloc restants (mal placés)
-    remaining = re.findall(r"\{\{\s*(?:stackup|artworks?|drilling_drawing|drilling_table)[^}]*\}\}",
-                           paragraph_text_all(content))
+    remaining = re.findall(
+        r"\{\{\s*(?:stackup|artworks?|drilling_drawing|drilling_table|checklist)[^}]*\}\}",
+        paragraph_text_all(content))
     for r in remaining:
         warnings.append(f"Marqueur de bloc non remplacé (doit être seul dans son paragraphe) : {r}")
     for k in sorted(unknown_inline):
